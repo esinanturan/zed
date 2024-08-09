@@ -1539,6 +1539,7 @@ pub(crate) struct NavigationData {
 
 enum GotoDefinitionKind {
     Symbol,
+    Declaration,
     Type,
     Implementation,
 }
@@ -8948,6 +8949,22 @@ impl Editor {
         self.go_to_definition_of_kind(GotoDefinitionKind::Symbol, false, cx)
     }
 
+    pub fn go_to_declaration(
+        &mut self,
+        _: &GoToDeclaration,
+        cx: &mut ViewContext<Self>,
+    ) -> Task<Result<bool>> {
+        self.go_to_definition_of_kind(GotoDefinitionKind::Declaration, false, cx)
+    }
+
+    pub fn go_to_declaration_split(
+        &mut self,
+        _: &GoToDeclaration,
+        cx: &mut ViewContext<Self>,
+    ) -> Task<Result<bool>> {
+        self.go_to_definition_of_kind(GotoDefinitionKind::Declaration, true, cx)
+    }
+
     pub fn go_to_implementation(
         &mut self,
         _: &GoToImplementation,
@@ -9008,6 +9025,7 @@ impl Editor {
         let project = workspace.read(cx).project().clone();
         let definitions = project.update(cx, |project, cx| match kind {
             GotoDefinitionKind::Symbol => project.definition(&buffer, head, cx),
+            GotoDefinitionKind::Declaration => project.declaration(&buffer, head, cx),
             GotoDefinitionKind::Type => project.type_definition(&buffer, head, cx),
             GotoDefinitionKind::Implementation => project.implementation(&buffer, head, cx),
         });
@@ -9596,6 +9614,7 @@ impl Editor {
                                 }
                             }),
                             disposition: BlockDisposition::Below,
+                            priority: 0,
                         }],
                         Some(Autoscroll::fit()),
                         cx,
@@ -9859,6 +9878,7 @@ impl Editor {
                             height: message_height,
                             render: diagnostic_block_renderer(diagnostic, None, true, true),
                             disposition: BlockDisposition::Below,
+                            priority: 0,
                         }
                     }),
                     cx,
@@ -10164,10 +10184,11 @@ impl Editor {
         if let Some(autoscroll) = autoscroll {
             self.request_autoscroll(autoscroll, cx);
         }
+        cx.notify();
         blocks
     }
 
-    pub(crate) fn resize_blocks(
+    pub fn resize_blocks(
         &mut self,
         heights: HashMap<CustomBlockId, u32>,
         autoscroll: Option<Autoscroll>,
@@ -10178,6 +10199,7 @@ impl Editor {
         if let Some(autoscroll) = autoscroll {
             self.request_autoscroll(autoscroll, cx);
         }
+        cx.notify();
     }
 
     pub fn replace_blocks(
@@ -10190,9 +10212,8 @@ impl Editor {
             .update(cx, |display_map, _cx| display_map.replace_blocks(renderers));
         if let Some(autoscroll) = autoscroll {
             self.request_autoscroll(autoscroll, cx);
-        } else {
-            cx.notify();
         }
+        cx.notify();
     }
 
     pub fn remove_blocks(
@@ -10207,6 +10228,7 @@ impl Editor {
         if let Some(autoscroll) = autoscroll {
             self.request_autoscroll(autoscroll, cx);
         }
+        cx.notify();
     }
 
     pub fn row_for_block(
@@ -11800,24 +11822,8 @@ impl Editor {
         editor_snapshot: &EditorSnapshot,
         cx: &mut ViewContext<Self>,
     ) -> Option<gpui::Point<Pixels>> {
-        let text_layout_details = self.text_layout_details(cx);
-        let line_height = text_layout_details
-            .editor_style
-            .text
-            .line_height_in_pixels(cx.rem_size());
         let source_point = source.to_display_point(editor_snapshot);
-        let first_visible_line = text_layout_details
-            .scroll_anchor
-            .anchor
-            .to_display_point(editor_snapshot);
-        if first_visible_line > source_point {
-            return None;
-        }
-        let source_x = editor_snapshot.x_for_display_point(source_point, &text_layout_details);
-        let source_y = line_height
-            * ((source_point.row() - first_visible_line.row()).0 as f32
-                - text_layout_details.scroll_anchor.offset.y);
-        Some(gpui::Point::new(source_x, source_y))
+        self.display_to_pixel_point(source_point, editor_snapshot, cx)
     }
 
     pub fn display_to_pixel_point(
@@ -11828,15 +11834,16 @@ impl Editor {
     ) -> Option<gpui::Point<Pixels>> {
         let line_height = self.style()?.text.line_height_in_pixels(cx.rem_size());
         let text_layout_details = self.text_layout_details(cx);
-        let first_visible_line = text_layout_details
+        let scroll_top = text_layout_details
             .scroll_anchor
-            .anchor
-            .to_display_point(editor_snapshot);
-        if first_visible_line > source {
+            .scroll_position(editor_snapshot)
+            .y;
+
+        if source.row().as_f32() < scroll_top.floor() {
             return None;
         }
         let source_x = editor_snapshot.x_for_display_point(source, &text_layout_details);
-        let source_y = line_height * (source.row() - first_visible_line.row()).0 as f32;
+        let source_y = line_height * (source.row().as_f32() - scroll_top);
         Some(gpui::Point::new(source_x, source_y))
     }
 

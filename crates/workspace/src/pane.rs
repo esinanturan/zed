@@ -237,7 +237,8 @@ pub struct Pane {
         Option<Arc<dyn Fn(&mut Pane, &dyn Any, &mut ViewContext<Pane>) -> ControlFlow<(), ()>>>,
     can_split: bool,
     should_display_tab_bar: Rc<dyn Fn(&ViewContext<Pane>) -> bool>,
-    render_tab_bar_buttons: Rc<dyn Fn(&mut Pane, &mut ViewContext<Pane>) -> AnyElement>,
+    render_tab_bar_buttons:
+        Rc<dyn Fn(&mut Pane, &mut ViewContext<Pane>) -> (Option<AnyElement>, Option<AnyElement>)>,
     _subscriptions: Vec<Subscription>,
     tab_bar_scroll_handle: ScrollHandle,
     /// Is None if navigation buttons are permanently turned off (and should not react to setting changes).
@@ -356,9 +357,12 @@ impl Pane {
             can_split: true,
             should_display_tab_bar: Rc::new(|cx| TabBarSettings::get_global(cx).show),
             render_tab_bar_buttons: Rc::new(move |pane, cx| {
+                if !pane.has_focus(cx) {
+                    return (None, None);
+                }
                 // Ideally we would return a vec of elements here to pass directly to the [TabBar]'s
                 // `end_slot`, but due to needing a view here that isn't possible.
-                h_flex()
+                let right_children = h_flex()
                     // Instead we need to replicate the spacing from the [TabBar]'s `end_slot` here.
                     .gap(Spacing::Small.rems(cx))
                     .child(
@@ -438,6 +442,8 @@ impl Pane {
                         el.child(Self::render_menu_overlay(split_item_menu))
                     })
                     .into_any_element()
+                    .into();
+                (None, right_children)
             }),
             display_nav_history_buttons: Some(
                 TabBarSettings::get_global(cx).show_nav_history_buttons,
@@ -483,10 +489,10 @@ impl Pane {
 
     pub fn has_focus(&self, cx: &WindowContext) -> bool {
         // We not only check whether our focus handle contains focus, but also
-        // whether the active_item might have focus, because we might have just activated an item
-        // but that hasn't rendered yet.
-        // So before the next render, we might have transferred focus
-        // to the item and `focus_handle.contains_focus` returns false because the `active_item`
+        // whether the active item might have focus, because we might have just activated an item
+        // that hasn't rendered yet.
+        // Before the next render, we might transfer focus
+        // to the item, and `focus_handle.contains_focus` returns false because the `active_item`
         // is not hooked up to us in the dispatch tree.
         self.focus_handle.contains_focused(cx)
             || self
@@ -582,7 +588,8 @@ impl Pane {
 
     pub fn set_render_tab_bar_buttons<F>(&mut self, cx: &mut ViewContext<Self>, render: F)
     where
-        F: 'static + Fn(&mut Pane, &mut ViewContext<Pane>) -> AnyElement,
+        F: 'static
+            + Fn(&mut Pane, &mut ViewContext<Pane>) -> (Option<AnyElement>, Option<AnyElement>),
     {
         self.render_tab_bar_buttons = Rc::new(render);
         cx.notify();
@@ -658,6 +665,12 @@ impl Pane {
         self.preview_item_id
     }
 
+    pub fn preview_item(&self) -> Option<Box<dyn ItemHandle>> {
+        self.preview_item_id
+            .and_then(|id| self.items.iter().find(|item| item.item_id() == id))
+            .cloned()
+    }
+
     fn preview_item_idx(&self) -> Option<usize> {
         if let Some(preview_item_id) = self.preview_item_id {
             self.items
@@ -681,9 +694,9 @@ impl Pane {
     }
 
     pub fn handle_item_edit(&mut self, item_id: EntityId, cx: &AppContext) {
-        if let Some(preview_item_id) = self.preview_item_id {
-            if preview_item_id == item_id {
-                self.set_preview_item_id(None, cx)
+        if let Some(preview_item) = self.preview_item() {
+            if preview_item.item_id() == item_id && !preview_item.preserve_preview(cx) {
+                self.set_preview_item_id(None, cx);
             }
         }
     }
@@ -1886,11 +1899,13 @@ impl Pane {
                         .start_child(navigate_forward)
                 },
             )
-            .when(self.has_focus(cx), |tab_bar| {
-                tab_bar.end_child({
-                    let render_tab_buttons = self.render_tab_bar_buttons.clone();
-                    render_tab_buttons(self, cx)
-                })
+            .map(|tab_bar| {
+                let render_tab_buttons = self.render_tab_bar_buttons.clone();
+                let (left_children, right_children) = render_tab_buttons(self, cx);
+
+                tab_bar
+                    .start_children(left_children)
+                    .end_children(right_children)
             })
             .children(
                 self.items
